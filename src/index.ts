@@ -12,6 +12,12 @@ import
 }
 from "./routes/admin/students.routes";
 
+import
+{
+    handleAdminEnrollmentRoutes
+}
+from "./routes/admin/enrollments.routes";
+
 import 
 {
     handleAuthRoutes
@@ -64,7 +70,8 @@ export default
             handleAdminUserRoutes,
             handleAdminPermissionRoutes,
 			handleAdminCourseRoutes,
-			handleAdminStudentRoutes
+			handleAdminStudentRoutes,
+            handleAdminEnrollmentRoutes
         ];
 
         for (const handler of handlers)

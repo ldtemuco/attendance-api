@@ -8,7 +8,6 @@ param()
 
 $API_VERSION = "v1"
 $MAX_RETRIES = 5
-$BOOTSTRAP_KEY = "TtJgnEFn7rBMeFMA"
 $CONTENT_TYPE_JSON = "application/json"
 
 
