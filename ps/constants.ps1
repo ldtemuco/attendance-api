@@ -30,6 +30,7 @@ $URL_ADMIN_USERS = "$URL_API/admin/users"
 $URL_ADMIN_COURSES = "$URL_API/admin/courses"
 $URL_ADMIN_STUDENTS = "$URL_API/admin/students"
 $URL_SETUP_ADMIN = "$URL_API/setup/admin"
+$URL_ATTENDANCE_PERIODS = "$URL_API/admin/attendance-periods"
 
 function Get-UserPermissionsUrl
 {
