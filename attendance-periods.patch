@@ -1,0 +1,935 @@
+diff --git a/ps/admin-attendance-periods-local.ps1 b/ps/admin-attendance-periods-local.ps1
+new file mode 100644
+index 0000000..7dce349
+--- /dev/null
++++ b/ps/admin-attendance-periods-local.ps1
+@@ -0,0 +1,69 @@
++# attendance-api/ps/admin-attendance-periods-local.ps1
++# Por defecto solo consulta. Con -Create crea el mes, sin cerrar ni modificar registros.
++
++[CmdletBinding()]
++param(
++    [int]$CourseId = 0,
++    [int]$Month = (Get-Date).Month,
++    [switch]$Create
++)
++
++. "$PSScriptRoot/constants.ps1"
++
++$periodsUrl = "$URL_API/admin/attendance-periods"
++
++$securePassword = Read-Host "Contraseña de admin" -AsSecureString
++$password = [System.Net.NetworkCredential]::new("", $securePassword).Password
++
++$loginBody = @{
++    username = "admin"
++    password = $password
++} | ConvertTo-Json
++
++$login = Invoke-RestMethod `
++    -Uri $URL_LOGIN `
++    -Method POST `
++    -ContentType $CONTENT_TYPE_JSON `
++    -Body $loginBody
++
++$headers = @{
++    Authorization = "Bearer $($login.token)"
++}
++
++if ($Create)
++{
++    if ($CourseId -le 0 -or $Month -lt 1 -or $Month -gt 12)
++    {
++        throw "Utiliza -Create -CourseId N -Month M (M entre 1 y 12)."
++    }
++
++    # Por defecto se utilizan el primer y último día calendario del mes.
++    $body = @{
++        courseId = $CourseId
++        month = $Month
++    } | ConvertTo-Json
++
++    $created = Invoke-RestMethod `
++        -Uri $periodsUrl `
++        -Method POST `
++        -Headers $headers `
++        -ContentType $CONTENT_TYPE_JSON `
++        -Body $body
++
++    Write-Host "Periodo creado:" -ForegroundColor Green
++    $created | ConvertTo-Json -Depth 6
++}
++
++$queryUrl = $periodsUrl
++
++if ($CourseId -gt 0)
++{
++    $queryUrl += "?courseId=$CourseId"
++}
++
++$periods = Invoke-RestMethod `
++    -Uri $queryUrl `
++    -Method GET `
++    -Headers $headers
++
++$periods.periods | Format-Table id, courseName, year, month, dateStart, dateEnd, state, attendanceCount
+diff --git a/src/index.ts b/src/index.ts
+index c86b385..85984e8 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -18,6 +18,12 @@ import
+ }
+ from "./routes/admin/enrollments.routes";
+ 
++import
++{
++    handleAdminAttendancePeriodRoutes
++}
++from "./routes/admin/attendance-periods.routes";
++
+ import 
+ {
+     handleAuthRoutes
+@@ -71,7 +77,8 @@ export default
+             handleAdminPermissionRoutes,
+ 			handleAdminCourseRoutes,
+ 			handleAdminStudentRoutes,
+-            handleAdminEnrollmentRoutes
++            handleAdminEnrollmentRoutes,
++            handleAdminAttendancePeriodRoutes
+         ];
+ 
+         for (const handler of handlers)
+diff --git a/src/queries/admin/attendance-periods.queries.ts b/src/queries/admin/attendance-periods.queries.ts
+new file mode 100644
+index 0000000..da6b42c
+--- /dev/null
++++ b/src/queries/admin/attendance-periods.queries.ts
+@@ -0,0 +1,185 @@
++const ST_PERIOD_COLUMNS =
++`
++    SELECT
++        ap.id,
++        ap.course_id AS courseId,
++        c.name AS courseName,
++        c.state AS courseState,
++        ap.year,
++        ay.status AS academicYearStatus,
++        ap.month,
++        ap.date_start AS dateStart,
++        ap.date_end AS dateEnd,
++        ap.state,
++        ap.closed_by AS closedBy,
++        ap.closed_at AS closedAt,
++        ap.created_at AS createdAt,
++        ap.updated_at AS updatedAt,
++        (
++            SELECT COUNT(*)
++            FROM attendances AS a
++            WHERE a.attendance_period_id = ap.id
++        ) AS attendanceCount
++
++    FROM attendance_periods AS ap
++
++    INNER JOIN courses AS c
++        ON c.id = ap.course_id
++
++    INNER JOIN academic_years AS ay
++        ON ay.id = c.academic_year_id
++`;
++
++export const ST_GET_ATTENDANCE_PERIODS =
++`
++    ${ST_PERIOD_COLUMNS}
++
++    WHERE ap.year = ?
++      AND (? IS NULL OR ap.course_id = ?)
++      AND (? IS NULL OR ap.state = ?)
++
++    ORDER BY c.level, c.letter, ap.month
++`;
++
++export const ST_GET_ATTENDANCE_PERIOD =
++`
++    ${ST_PERIOD_COLUMNS}
++
++    WHERE ap.id = ?
++
++    LIMIT 1
++`;
++
++export const ST_GET_ACTIVE_YEAR_FOR_PERIODS =
++`
++    SELECT id, year
++
++    FROM academic_years
++
++    WHERE status = 'ACTIVE'
++
++    ORDER BY year DESC
++
++    LIMIT 1
++`;
++
++export const ST_GET_ACTIVE_COURSE_FOR_PERIODS =
++`
++    SELECT c.id, ay.year
++
++    FROM courses AS c
++
++    INNER JOIN academic_years AS ay
++        ON ay.id = c.academic_year_id
++
++    WHERE c.id = ?
++      AND c.state = 'ACTIVE'
++      AND ay.status = 'ACTIVE'
++
++    LIMIT 1
++`;
++
++export const ST_GET_PERIOD_BY_COURSE_AND_MONTH =
++`
++    SELECT id
++
++    FROM attendance_periods
++
++    WHERE course_id = ?
++      AND year = ?
++      AND month = ?
++
++    LIMIT 1
++`;
++
++export const ST_CREATE_ATTENDANCE_PERIOD =
++`
++    INSERT INTO attendance_periods
++    (
++        course_id, year, month, date_start, date_end, state
++    )
++    SELECT c.id, ay.year, ?, ?, ?, 'OPEN'
++
++    FROM courses AS c
++
++    INNER JOIN academic_years AS ay
++        ON ay.id = c.academic_year_id
++
++    WHERE c.id = ?
++      AND c.state = 'ACTIVE'
++      AND ay.status = 'ACTIVE'
++`;
++
++export const ST_UPDATE_ATTENDANCE_PERIOD_DATES =
++`
++    UPDATE attendance_periods
++
++    SET date_start = ?,
++        date_end = ?,
++        updated_at = CURRENT_TIMESTAMP
++
++    WHERE id = ?
++      AND state = 'OPEN'
++      AND EXISTS
++      (
++          SELECT 1
++          FROM courses AS c
++          INNER JOIN academic_years AS ay
++              ON ay.id = c.academic_year_id
++          WHERE c.id = attendance_periods.course_id
++            AND c.state = 'ACTIVE'
++            AND ay.status = 'ACTIVE'
++      )
++      AND NOT EXISTS
++      (
++          SELECT 1
++          FROM attendances AS a
++          WHERE a.attendance_period_id = attendance_periods.id
++            AND (a.date < ? OR a.date > ?)
++      )
++`;
++
++export const ST_CLOSE_ATTENDANCE_PERIOD =
++`
++    UPDATE attendance_periods
++
++    SET state = 'CLOSED',
++        closed_by = ?,
++        closed_at = CURRENT_TIMESTAMP,
++        updated_at = CURRENT_TIMESTAMP
++
++    WHERE id = ?
++      AND state = 'OPEN'
++      AND EXISTS
++      (
++          SELECT 1
++          FROM courses AS c
++          INNER JOIN academic_years AS ay
++              ON ay.id = c.academic_year_id
++          WHERE c.id = attendance_periods.course_id
++            AND ay.status = 'ACTIVE'
++      )
++`;
++
++export const ST_REOPEN_ATTENDANCE_PERIOD =
++`
++    UPDATE attendance_periods
++
++    SET state = 'OPEN',
++        closed_by = NULL,
++        closed_at = NULL,
++        updated_at = CURRENT_TIMESTAMP
++
++    WHERE id = ?
++      AND state = 'CLOSED'
++      AND EXISTS
++      (
++          SELECT 1
++          FROM courses AS c
++          INNER JOIN academic_years AS ay
++              ON ay.id = c.academic_year_id
++          WHERE c.id = attendance_periods.course_id
++            AND c.state = 'ACTIVE'
++            AND ay.status = 'ACTIVE'
++      )
++`;
+diff --git a/src/routes/admin/attendance-periods.routes.ts b/src/routes/admin/attendance-periods.routes.ts
+new file mode 100644
+index 0000000..2427bf0
+--- /dev/null
++++ b/src/routes/admin/attendance-periods.routes.ts
+@@ -0,0 +1,457 @@
++import type { Env } from "../../types/env";
++import type
++{
++    AttendancePeriodRecord,
++    CreateAttendancePeriodRequest,
++    UpdateAttendancePeriodRequest,
++    PeriodCourseRecord
++}
++from "../../types/attendance-period";
++import
++{
++    authenticate
++}
++from "../../security/auth";
++import
++{
++    jsonResponse,
++    RESPONSE_SUCCESS,
++    RESPONSE_FORBIDDEN,
++    RESPONSE_INVALID_JSON,
++    RESPONSE_REQUIRED_FIELDS,
++    RESPONSE_COURSE_NOT_FOUND,
++    RESPONSE_ACADEMIC_YEAR_NOT_FOUND
++}
++from "../../utils/response";
++import
++{
++    RESPONSE_INVALID_PERIOD_ID,
++    RESPONSE_PERIOD_NOT_FOUND,
++    RESPONSE_INVALID_PERIOD_FILTER,
++    RESPONSE_INVALID_PERIOD_MONTH,
++    RESPONSE_INVALID_PERIOD_DATES,
++    RESPONSE_PERIOD_EXISTS,
++    RESPONSE_PERIOD_LOCKED,
++    RESPONSE_PERIOD_YEAR_CLOSED,
++    RESPONSE_PERIOD_CONFLICT,
++    RESPONSE_PERIOD_CREATED,
++    RESPONSE_PERIOD_UPDATED,
++    RESPONSE_PERIOD_CLOSED,
++    RESPONSE_PERIOD_REOPENED,
++    RESPONSE_PERIOD_WRITE_FAILED
++}
++from "../../utils/attendance-period-response";
++import
++{
++    ST_GET_ATTENDANCE_PERIODS,
++    ST_GET_ATTENDANCE_PERIOD,
++    ST_GET_ACTIVE_YEAR_FOR_PERIODS,
++    ST_GET_ACTIVE_COURSE_FOR_PERIODS,
++    ST_GET_PERIOD_BY_COURSE_AND_MONTH,
++    ST_CREATE_ATTENDANCE_PERIOD,
++    ST_UPDATE_ATTENDANCE_PERIOD_DATES,
++    ST_CLOSE_ATTENDANCE_PERIOD,
++    ST_REOPEN_ATTENDANCE_PERIOD
++}
++from "../../queries/admin/attendance-periods.queries";
++import
++{
++    areValidPeriodDates,
++    getMonthBounds,
++    isPositiveInteger
++}
++from "../../services/attendance-period-validation";
++
++const PATH_PERIODS = "/api/admin/attendance-periods";
++const PATH_PERIOD = /^\/api\/admin\/attendance-periods\/(\d+)$/;
++const PATH_PERIOD_ACTION = /^\/api\/admin\/attendance-periods\/(\d+)\/(close|reopen)$/;
++
++//==================================================================================================
++// ROUTER - ADMINISTRATOR ONLY
++//==================================================================================================
++
++export async function handleAdminAttendancePeriodRoutes(
++    request: Request,
++    env: Env,
++    url: URL
++): Promise<Response | null>
++{
++    const periodMatch = url.pathname.match(PATH_PERIOD);
++    const actionMatch = url.pathname.match(PATH_PERIOD_ACTION);
++
++    if (url.pathname !== PATH_PERIODS && !periodMatch && !actionMatch)
++    {
++        return null;
++    }
++
++    const auth = await authenticate(request, env.DB);
++
++    if (!auth.authenticated)
++    {
++        return auth.response;
++    }
++
++    if (auth.user.role !== "ADMIN")
++    {
++        return jsonResponse(RESPONSE_FORBIDDEN, 403);
++    }
++
++    if (request.method === "GET" && url.pathname === PATH_PERIODS)
++    {
++        return getPeriods(env, url);
++    }
++
++    if (request.method === "POST" && url.pathname === PATH_PERIODS)
++    {
++        return createPeriod(request, env);
++    }
++
++    if (periodMatch)
++    {
++        const periodId = Number(periodMatch[1]);
++
++        if (!isPositiveInteger(periodId))
++        {
++            return jsonResponse(RESPONSE_INVALID_PERIOD_ID, 400);
++        }
++
++        if (request.method === "GET")
++        {
++            return getPeriod(env, periodId);
++        }
++
++        if (request.method === "PUT")
++        {
++            return updatePeriod(request, env, periodId);
++        }
++    }
++
++    if (actionMatch && request.method === "POST")
++    {
++        const periodId = Number(actionMatch[1]);
++
++        if (!isPositiveInteger(periodId))
++        {
++            return jsonResponse(RESPONSE_INVALID_PERIOD_ID, 400);
++        }
++
++        return setPeriodState(env, periodId, auth.user.id, actionMatch[2] === "close");
++    }
++
++    return null;
++}
++
++//==================================================================================================
++// LIST PERIODS - defaults to ACTIVE academic year; historical records remain queryable
++//==================================================================================================
++
++async function getPeriods(env: Env, url: URL): Promise<Response>
++{
++    const rawYear = url.searchParams.get("year");
++    const rawCourseId = url.searchParams.get("courseId");
++    const state = url.searchParams.get("state");
++
++    if (
++        (rawYear !== null && (!/^\d{4}$/.test(rawYear) || Number(rawYear) < 1900)) ||
++        (rawCourseId !== null && (!/^[1-9]\d*$/.test(rawCourseId) || !Number.isSafeInteger(Number(rawCourseId)))) ||
++        (state !== null && state !== "OPEN" && state !== "CLOSED")
++    )
++    {
++        return jsonResponse(RESPONSE_INVALID_PERIOD_FILTER, 400);
++    }
++
++    let year = rawYear === null ? null : Number(rawYear);
++    const courseId = rawCourseId === null ? null : Number(rawCourseId);
++
++    if (year === null)
++    {
++        const current = await env.DB
++            .prepare(ST_GET_ACTIVE_YEAR_FOR_PERIODS)
++            .first<{ id: number; year: number }>();
++
++        if (!current)
++        {
++            return jsonResponse(RESPONSE_ACADEMIC_YEAR_NOT_FOUND, 409);
++        }
++
++        year = current.year;
++    }
++
++    const result = await env.DB
++        .prepare(ST_GET_ATTENDANCE_PERIODS)
++        .bind(year, courseId, courseId, state, state)
++        .all<AttendancePeriodRecord>();
++
++    return jsonResponse
++    ({
++        ...RESPONSE_SUCCESS,
++        year,
++        periods: result.results.map(toPeriodResponse)
++    });
++}
++
++//==================================================================================================
++// GET PERIOD
++//==================================================================================================
++
++async function getPeriod(env: Env, periodId: number): Promise<Response>
++{
++    const period = await findPeriod(env.DB, periodId);
++
++    if (!period)
++    {
++        return jsonResponse(RESPONSE_PERIOD_NOT_FOUND, 404);
++    }
++
++    return jsonResponse({ ...RESPONSE_SUCCESS, period: toPeriodResponse(period) });
++}
++
++//==================================================================================================
++// CREATE PERIOD
++//==================================================================================================
++
++async function createPeriod(request: Request, env: Env): Promise<Response>
++{
++    const data = await readBody(request);
++
++    if (!data)
++    {
++        return jsonResponse(RESPONSE_INVALID_JSON, 400);
++    }
++
++    const input = data as Partial<CreateAttendancePeriodRequest>;
++
++    if (!isPositiveInteger(input.courseId))
++    {
++        return jsonResponse(RESPONSE_REQUIRED_FIELDS, 400);
++    }
++
++    if (typeof input.month !== "number" || !Number.isInteger(input.month) || input.month < 1 || input.month > 12)
++    {
++        return jsonResponse(RESPONSE_INVALID_PERIOD_MONTH, 400);
++    }
++
++    const course = await env.DB
++        .prepare(ST_GET_ACTIVE_COURSE_FOR_PERIODS)
++        .bind(input.courseId)
++        .first<PeriodCourseRecord>();
++
++    if (!course)
++    {
++        return jsonResponse(RESPONSE_COURSE_NOT_FOUND, 404);
++    }
++
++    const bounds = getMonthBounds(course.year, input.month);
++    const dateStart = input.dateStart === undefined ? bounds.dateStart : input.dateStart;
++    const dateEnd = input.dateEnd === undefined ? bounds.dateEnd : input.dateEnd;
++
++    if (!areValidPeriodDates(course.year, input.month, dateStart, dateEnd))
++    {
++        return jsonResponse(RESPONSE_INVALID_PERIOD_DATES, 400);
++    }
++
++    const existing = await env.DB
++        .prepare(ST_GET_PERIOD_BY_COURSE_AND_MONTH)
++        .bind(input.courseId, course.year, input.month)
++        .first<{ id: number }>();
++
++    if (existing)
++    {
++        return jsonResponse(RESPONSE_PERIOD_EXISTS, 409);
++    }
++
++    try
++    {
++        const result = await env.DB
++            .prepare(ST_CREATE_ATTENDANCE_PERIOD)
++            .bind(input.month, dateStart, dateEnd, input.courseId)
++            .run();
++
++        if (result.meta.changes !== 1)
++        {
++            return jsonResponse(RESPONSE_PERIOD_CONFLICT, 409);
++        }
++
++        const period = await findPeriod(env.DB, Number(result.meta.last_row_id));
++
++        if (!period)
++        {
++            return jsonResponse(RESPONSE_PERIOD_WRITE_FAILED, 500);
++        }
++
++        return jsonResponse
++        ({
++            ...RESPONSE_PERIOD_CREATED,
++            period: toPeriodResponse(period)
++        }, 201);
++    }
++    catch (error)
++    {
++        return periodWriteError(error);
++    }
++}
++
++//==================================================================================================
++// UPDATE DATES - ONLY OPEN PERIODS; NO ATTENDANCE RECORD MAY BE LEFT OUTSIDE
++//==================================================================================================
++
++async function updatePeriod(request: Request, env: Env, periodId: number): Promise<Response>
++{
++    const existing = await findPeriod(env.DB, periodId);
++
++    if (!existing)
++    {
++        return jsonResponse(RESPONSE_PERIOD_NOT_FOUND, 404);
++    }
++
++    if (existing.academicYearStatus !== "ACTIVE")
++    {
++        return jsonResponse(RESPONSE_PERIOD_YEAR_CLOSED, 409);
++    }
++
++    if (existing.state !== "OPEN")
++    {
++        return jsonResponse(RESPONSE_PERIOD_LOCKED, 409);
++    }
++
++    const data = await readBody(request);
++
++    if (!data)
++    {
++        return jsonResponse(RESPONSE_INVALID_JSON, 400);
++    }
++
++    const input = data as Partial<UpdateAttendancePeriodRequest>;
++    const dateStart = input.dateStart === undefined ? existing.dateStart : input.dateStart;
++    const dateEnd = input.dateEnd === undefined ? existing.dateEnd : input.dateEnd;
++
++    if (!areValidPeriodDates(existing.year, existing.month, dateStart, dateEnd))
++    {
++        return jsonResponse(RESPONSE_INVALID_PERIOD_DATES, 400);
++    }
++
++    try
++    {
++        const result = await env.DB
++            .prepare(ST_UPDATE_ATTENDANCE_PERIOD_DATES)
++            .bind(dateStart, dateEnd, periodId, dateStart, dateEnd)
++            .run();
++
++        if (result.meta.changes !== 1)
++        {
++            return jsonResponse(RESPONSE_PERIOD_CONFLICT, 409);
++        }
++
++        const updated = await findPeriod(env.DB, periodId);
++
++        return jsonResponse
++        ({
++            ...RESPONSE_PERIOD_UPDATED,
++            period: updated ? toPeriodResponse(updated) : null
++        });
++    }
++    catch (error)
++    {
++        return periodWriteError(error);
++    }
++}
++
++//==================================================================================================
++// CLOSE / REOPEN - ATOMIC STATE CHANGES
++//==================================================================================================
++
++async function setPeriodState(
++    env: Env,
++    periodId: number,
++    userId: number,
++    closing: boolean
++): Promise<Response>
++{
++    const existing = await findPeriod(env.DB, periodId);
++
++    if (!existing)
++    {
++        return jsonResponse(RESPONSE_PERIOD_NOT_FOUND, 404);
++    }
++
++    if (existing.academicYearStatus !== "ACTIVE")
++    {
++        return jsonResponse(RESPONSE_PERIOD_YEAR_CLOSED, 409);
++    }
++
++    if (existing.state !== (closing ? "OPEN" : "CLOSED"))
++    {
++        return jsonResponse(RESPONSE_PERIOD_CONFLICT, 409);
++    }
++
++    try
++    {
++        const result = closing
++            ? await env.DB.prepare(ST_CLOSE_ATTENDANCE_PERIOD).bind(userId, periodId).run()
++            : await env.DB.prepare(ST_REOPEN_ATTENDANCE_PERIOD).bind(periodId).run();
++
++        if (result.meta.changes !== 1)
++        {
++            return jsonResponse(RESPONSE_PERIOD_CONFLICT, 409);
++        }
++
++        const updated = await findPeriod(env.DB, periodId);
++
++        return jsonResponse
++        ({
++            ...(closing ? RESPONSE_PERIOD_CLOSED : RESPONSE_PERIOD_REOPENED),
++            period: updated ? toPeriodResponse(updated) : null
++        });
++    }
++    catch (error)
++    {
++        return periodWriteError(error);
++    }
++}
++
++//==================================================================================================
++// HELPERS
++//==================================================================================================
++
++async function readBody(request: Request): Promise<Record<string, unknown> | null>
++{
++    try
++    {
++        const data: unknown = await request.json();
++
++        if (data === null || Array.isArray(data) || typeof data !== "object")
++        {
++            return null;
++        }
++
++        return data as Record<string, unknown>;
++    }
++    catch
++    {
++        return null;
++    }
++}
++
++async function findPeriod(db: D1Database, periodId: number): Promise<AttendancePeriodRecord | null>
++{
++    return db.prepare(ST_GET_ATTENDANCE_PERIOD).bind(periodId).first<AttendancePeriodRecord>();
++}
++
++function toPeriodResponse(record: AttendancePeriodRecord)
++{
++    const { academicYearStatus, courseState, ...fields } = record;
++    return fields;
++}
++
++function periodWriteError(error: unknown): Response
++{
++    const message = error instanceof Error ? error.message : String(error);
++
++    if (message.includes("UNIQUE constraint failed") || message.includes("SQLITE_CONSTRAINT_UNIQUE"))
++    {
++        return jsonResponse(RESPONSE_PERIOD_EXISTS, 409);
++    }
++
++    console.error("Unable to save attendance period:", error);
++    return jsonResponse(RESPONSE_PERIOD_WRITE_FAILED, 500);
++}
+diff --git a/src/services/attendance-period-validation.ts b/src/services/attendance-period-validation.ts
+new file mode 100644
+index 0000000..635b2f8
+--- /dev/null
++++ b/src/services/attendance-period-validation.ts
+@@ -0,0 +1,48 @@
++export function isPositiveInteger(value: unknown): value is number
++{
++    return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
++}
++
++export function isValidIsoDate(value: unknown): value is string
++{
++    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
++    {
++        return false;
++    }
++
++    const date = new Date(`${value}T00:00:00.000Z`);
++
++    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
++}
++
++export function getMonthBounds(year: number, month: number): { dateStart: string; dateEnd: string }
++{
++    const prefix = `${year}-${String(month).padStart(2, "0")}`;
++    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
++
++    return {
++        dateStart: `${prefix}-01`,
++        dateEnd: `${prefix}-${String(lastDay).padStart(2, "0")}`
++    };
++}
++
++export function areValidPeriodDates(
++    year: number,
++    month: number,
++    dateStart: unknown,
++    dateEnd: unknown
++): dateStart is string
++{
++    if (!Number.isInteger(year) || year < 1900 || year > 9999 ||
++        !Number.isInteger(month) || month < 1 || month > 12 ||
++        !isValidIsoDate(dateStart) || !isValidIsoDate(dateEnd))
++    {
++        return false;
++    }
++
++    const prefix = `${year}-${String(month).padStart(2, "0")}-`;
++
++    return dateStart.startsWith(prefix) &&
++        dateEnd.startsWith(prefix) &&
++        dateStart <= dateEnd;
++}
+diff --git a/src/types/attendance-period.ts b/src/types/attendance-period.ts
+new file mode 100644
+index 0000000..f92d6af
+--- /dev/null
++++ b/src/types/attendance-period.ts
+@@ -0,0 +1,40 @@
++export type AttendancePeriodState = "OPEN" | "CLOSED";
++
++export interface AttendancePeriodRecord
++{
++    id: number;
++    courseId: number;
++    courseName: string;
++    courseState: string;
++    year: number;
++    academicYearStatus: string;
++    month: number;
++    dateStart: string;
++    dateEnd: string;
++    state: AttendancePeriodState;
++    closedBy: number | null;
++    closedAt: string | null;
++    createdAt: string;
++    updatedAt: string;
++    attendanceCount: number;
++}
++
++export interface PeriodCourseRecord
++{
++    id: number;
++    year: number;
++}
++
++export interface CreateAttendancePeriodRequest
++{
++    courseId: number;
++    month: number;
++    dateStart?: string;
++    dateEnd?: string;
++}
++
++export interface UpdateAttendancePeriodRequest
++{
++    dateStart?: string;
++    dateEnd?: string;
++}
+diff --git a/src/utils/attendance-period-response.ts b/src/utils/attendance-period-response.ts
+new file mode 100644
+index 0000000..2a95020
+--- /dev/null
++++ b/src/utils/attendance-period-response.ts
+@@ -0,0 +1,14 @@
++export const RESPONSE_INVALID_PERIOD_ID = { success: false, message: "Invalid attendance period id" } as const;
++export const RESPONSE_PERIOD_NOT_FOUND = { success: false, message: "Attendance period not found" } as const;
++export const RESPONSE_INVALID_PERIOD_FILTER = { success: false, message: "Invalid attendance period filter" } as const;
++export const RESPONSE_INVALID_PERIOD_MONTH = { success: false, message: "Month must be an integer between 1 and 12" } as const;
++export const RESPONSE_INVALID_PERIOD_DATES = { success: false, message: "Dates must be valid, ordered and inside the selected month" } as const;
++export const RESPONSE_PERIOD_EXISTS = { success: false, message: "Attendance period already exists for this course and month" } as const;
++export const RESPONSE_PERIOD_LOCKED = { success: false, message: "The attendance period is closed" } as const;
++export const RESPONSE_PERIOD_YEAR_CLOSED = { success: false, message: "The academic year is closed" } as const;
++export const RESPONSE_PERIOD_CONFLICT = { success: false, message: "Attendance period changed or the dates exclude registered attendance" } as const;
++export const RESPONSE_PERIOD_CREATED = { success: true, message: "Attendance period created successfully" } as const;
++export const RESPONSE_PERIOD_UPDATED = { success: true, message: "Attendance period updated successfully" } as const;
++export const RESPONSE_PERIOD_CLOSED = { success: true, message: "Attendance period closed successfully" } as const;
++export const RESPONSE_PERIOD_REOPENED = { success: true, message: "Attendance period reopened successfully" } as const;
++export const RESPONSE_PERIOD_WRITE_FAILED = { success: false, message: "Unable to save attendance period" } as const;
+diff --git a/test/attendance-periods-validation.spec.ts b/test/attendance-periods-validation.spec.ts
+new file mode 100644
+index 0000000..c47555e
+--- /dev/null
++++ b/test/attendance-periods-validation.spec.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from "vitest";
++import
++{
++    areValidPeriodDates,
++    getMonthBounds,
++    isPositiveInteger,
++    isValidIsoDate
++}
++from "../src/services/attendance-period-validation";
++
++describe("Attendance period validation", () =>
++{
++    it("calculates February limits in a leap year", () =>
++    {
++        expect(getMonthBounds(2028, 2)).toEqual
++        ({
++            dateStart: "2028-02-01",
++            dateEnd: "2028-02-29"
++        });
++    });
++
++    it("calculates the non-leap February and December", () =>
++    {
++        expect(getMonthBounds(2026, 2).dateEnd).toBe("2026-02-28");
++        expect(getMonthBounds(2026, 12).dateEnd).toBe("2026-12-31");
++    });
++
++    it("rejects invalid calendar dates", () =>
++    {
++        expect(isValidIsoDate("2026-02-29")).toBe(false);
++        expect(isValidIsoDate("2026-13-01")).toBe(false);
++        expect(isValidIsoDate("2026-10-12")).toBe(true);
++    });
++
++    it("does not accept decimals or numeric strings as ids", () =>
++    {
++        expect(isPositiveInteger(2)).toBe(true);
++        expect(isPositiveInteger("2")).toBe(false);
++        expect(isPositiveInteger(1.2)).toBe(false);
++    });
++
++    it("rejects dates in another month or another year", () =>
++    {
++        expect(areValidPeriodDates(2026, 10, "2026-10-01", "2026-11-01")).toBe(false);
++        expect(areValidPeriodDates(2026, 10, "2025-10-01", "2025-10-31")).toBe(false);
++    });
++
++    it("rejects inverted dates and accepts valid shortened periods", () =>
++    {
++        expect(areValidPeriodDates(2026, 10, "2026-10-25", "2026-10-10")).toBe(false);
++        expect(areValidPeriodDates(2026, 10, "2026-10-05", "2026-10-30")).toBe(true);
++    });
++});

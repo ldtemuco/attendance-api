@@ -9,7 +9,8 @@ param()
 $API_VERSION = "v1"
 $MAX_RETRIES = 5
 $CONTENT_TYPE_JSON = "application/json"
-
+$LOCAL_ADMIN = "admin"
+$LOCAL_PASSWORD = "UnaClaveSegura123!"
 
 #  Definimos si se usará el entorno remoto o local
 $USE_REMOTE = $false

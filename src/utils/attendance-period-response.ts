@@ -1,0 +1,14 @@
+export const RESPONSE_INVALID_PERIOD_ID = { success: false, message: "Invalid attendance period id" } as const;
+export const RESPONSE_PERIOD_NOT_FOUND = { success: false, message: "Attendance period not found" } as const;
+export const RESPONSE_INVALID_PERIOD_FILTER = { success: false, message: "Invalid attendance period filter" } as const;
+export const RESPONSE_INVALID_PERIOD_MONTH = { success: false, message: "Month must be an integer between 1 and 12" } as const;
+export const RESPONSE_INVALID_PERIOD_DATES = { success: false, message: "Dates must be valid, ordered and inside the selected month" } as const;
+export const RESPONSE_PERIOD_EXISTS = { success: false, message: "Attendance period already exists for this course and month" } as const;
+export const RESPONSE_PERIOD_LOCKED = { success: false, message: "The attendance period is closed" } as const;
+export const RESPONSE_PERIOD_YEAR_CLOSED = { success: false, message: "The academic year is closed" } as const;
+export const RESPONSE_PERIOD_CONFLICT = { success: false, message: "Attendance period changed or the dates exclude registered attendance" } as const;
+export const RESPONSE_PERIOD_CREATED = { success: true, message: "Attendance period created successfully" } as const;
+export const RESPONSE_PERIOD_UPDATED = { success: true, message: "Attendance period updated successfully" } as const;
+export const RESPONSE_PERIOD_CLOSED = { success: true, message: "Attendance period closed successfully" } as const;
+export const RESPONSE_PERIOD_REOPENED = { success: true, message: "Attendance period reopened successfully" } as const;
+export const RESPONSE_PERIOD_WRITE_FAILED = { success: false, message: "Unable to save attendance period" } as const;
