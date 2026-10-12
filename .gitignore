@@ -153,7 +153,7 @@ test
 # Stores VSCode versions used for testing VSCode extensions
 
 .vscode-test
-.vscode
+.vscode/
 
 # Power Sheel testing scripts
 ps
