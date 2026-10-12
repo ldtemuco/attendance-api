@@ -1,0 +1,3 @@
+export const MIN_STUDENT_CODE = 10000;
+export const MAX_STUDENT_CODE = 90000;
+export const STUDENT_CODE_GENERATION_ATTEMPTS = 50;
