@@ -156,7 +156,11 @@ test
 .vscode/
 
 # Power Sheel testing scripts
-#ps
+ps
+
+# Testing Credentials (Don't upload!)
+ps/local/secrets.ps1
+ps/remote/secrets.ps1
 
 # yarn v2
 
